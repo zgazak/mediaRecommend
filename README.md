@@ -40,7 +40,7 @@ rec = mediaRecommend(debug=True)
 
 # run recommender on client(s)
 # and automatically update the Tornado database MediaRecommend
-clientlist=['522bb206bd3911e08d854040d3dc5c07','64beaf9221994ddb93e4c8d10363da85','7ff5784d10ff418ea2b599350cda9ec2']
+clientlist=[‘client_key’]
 rec.build_client_model(clientlist=clientlist)
 
 ## other parameters:
