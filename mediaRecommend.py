@@ -135,8 +135,8 @@ class mediaRecommend(object):
             self.distribute_LDA(load_to_tornado=True)
 
             ### step 6: export LDA for visualization
-            self.save_LDA()
-
+            ### for testing only
+            # self.save_LDA()
 
             if self.debug:
                 print "### client recommendation model complete in %0.1fs" % (time()-t0)
@@ -193,13 +193,15 @@ class mediaRecommend(object):
             print "       ... fitting clusters...",
             t0 = time()
 
-        ## Try to make this more elegant... structure of model[] output is not great
+        ## Try to make this more elegant... structure of model[] output is sparse... use that for speed
         clust = np.zeros((nclust,len(texts)))
         for j in np.arange(len(corpus)):
             res = model[corpus[j]]
             for i,val in res:
                 try: clust[i][j] = val
-                except: pdb.set_trace()
+                except:
+                    if self.debug: 
+                        pdb.set_trace()
 
         if self.debug:
             print " done in %0.1fs" % (time() - t0)
@@ -226,9 +228,18 @@ class mediaRecommend(object):
         if self.debug: 
             print " done in %0.1fs" % (time() - t0)
             print " finished in %0.1f" % (time() -tock)
-         
+            #for i in np.arange(nclust): LDA_data[('c%i'%(i+1))]= [c for c in clust[i]]
+            #LDA_data.to_pickle('save_LDA_%s.sav'%(self.clientKey))
+            #try:
+            #    wcsv = csv.writer(open("save_recmodel_%s.csv.sav"%(self.clientKey), "w"))
+            #    for key, val in self.recommendation_model.items(): wcsv.writerow([key, val])
+            #    wcsv = csv.writer(open("save_crossprob_%s.csv.sav"%(self.clientKey), "w"))
+            #    for line in crossprob: wcsv.writerow(line)
+            #except: pdb.set_trace()
+
     def save_LDA(self):
         if self.debug: print "saving LDA"
+        #LDA_data.to_pickle('save_LDA_%s.sav'%(self.clientKey))
         if self.runMode == 'client':
             try: self.LDA_data.to_csv('/mnt/work/save_LDA_%s_%s.csv.sav'%(self.clientKey,self.runMode))
             except: pdb.set_trace()
@@ -243,6 +254,10 @@ class mediaRecommend(object):
             return "%s_%s"%(self.domainKey,search)
 
     def distribute_LDA(self,load_to_tornado=True):
+        if self.debug:
+            tock = time()
+            print "...Distributing LDA model"
+      
         r_tornado = regan.Regan(host='http://localhost:7346')
 
         ##MediaRecommend
@@ -258,6 +273,7 @@ class mediaRecommend(object):
             else: prob_matrix = np.sort(np.random.choice(prob_matrix,self.nrec,replace=False,p=weights/np.sum(weights)),order='probability')
             try:
                 self.recommendation_model[key] = {"base_url": url, "rec_embed":prob_matrix['rec_embed'] ,"recommendation": prob_matrix['recommendation'], "weight": prob_matrix['probability']/np.sum(prob_matrix['probability'])}
+                #if math.isnan(np.sum(prob_matrix['probability'])): pdb.set_trace()
                 r_tornado.put('MediaRecommend', key, dict(referrer_urls=["%s"%s for s in prob_matrix['rec_embed']],
                                                         urls=["%s"%s for s in prob_matrix['recommendation']], 
                                                         weights=["%0.3f"%s for s in prob_matrix['probability']/np.sum(prob_matrix['probability'])],
@@ -267,7 +283,7 @@ class mediaRecommend(object):
             except:
                 if self.debug: 
                     print "something failed for key %s" % (key)
-                    pdb.set_trace()
+                    #pdb.set_trace()
 
         ### add trending videos
         key = self.build_key('nomatch',encode=False) 
@@ -289,7 +305,7 @@ class mediaRecommend(object):
                 t0 = time()
                 print "pushing to tornado."
             r_tornado.go()   
-            if self.debug: print " done in %0.1fs" % (time() - t0)
+            if self.debug: print " done in %0.1fs" % (time() - tock)
 
         #else: pdb.set_trace()
 
@@ -332,8 +348,10 @@ class mediaRecommend(object):
                         if np.min(spans) == 0: 
                             for i in np.where(spans == 0)[0]:spans[i] = spans[i-1]
                         try: focus_score = np.min([1.0,np.sum(time_on_vid/spans)/len(spans)])
-                        except: pdb.set_trace()
-                        if pd.isnull(focus_score): pdb.set_trace()
+                        except: 
+                            if self.debug: 
+                               pdb.set_trace()
+                        #if pd.isnull(focus_score): pdb.set_trace()
 
                         if video not in self.documents:          
                             self.documents[video] = [[],[],[],[],0,0,0,0,[],'',''] ## the document [[document],[users],[Tinteracts],[focus_scores], best_guess_length, focus_avg, iscore_avg, site_pop,[ips],embed_url,domain]
@@ -348,14 +366,29 @@ class mediaRecommend(object):
             ### some videos won't make it in because no actual plays
             if video in self.documents:
                 ### now compile all the stats for that video ...
+                isig = np.std(self.documents[video][2]/self.documents[video][4])
                 self.documents[video][6] = np.average(self.documents[video][2]/self.documents[video][4])
                 self.documents[video][5] = np.average(self.documents[video][3])
-                self.documents[video][7] = len(self.documents[video][1])
+                
+                ## redefine popularity... total time engagement with video...
+                self.documents[video][7] = np.sum(self.documents[video][2])
+                ##self.documents[video][7] = len(self.documents[video][1])
 
-
+                """ new recipe:
+                    iscore << median (2 sig? normal assumed), negative sentiment, append user with "n"
+                    iscore < median: in once
+                    iscore >= median: in twice
+                """
                 for (user,interact) in zip(self.documents[video][1],self.documents[video][2]):
-                    iscore = np.min([30,np.round(interact/self.documents[video][4],decimals=1)*10])
-                    for i in np.arange(iscore): self.documents[video][0].append(user)
+                    iscore =  (interact/self.documents[video][4]- self.documents[video][6])/isig
+                    ## negative sentiment::  
+                    if iscore <= -1.5: self.documents[video][0].append('neg_'+user)
+                    ## general positive sentiment:: 
+                    elif iscore < 1: self.documents[video][0].append(user)
+                    ## significant positive sentiment:: 
+                    else: 
+                        for i in np.arange(min(5,round(iscore))): self.documents[video][0].append(user)
+
                 self.documents[video][0] = ' '.join(self.documents[video][0])
 
         if self.debug: print " finished in %0.1f" % (time()-t0)
@@ -475,10 +508,9 @@ class mediaRecommend(object):
 
 if __name__ == "__main__":
     ###  example execution::
-    rec = mediaRecommend(debug=True)
+    rec = mediaRecommend()
 
-    ## this won't function... actual client keys removed for public repo.
-    clientlist = ['clientKey']
+    clientlist = ['clientID...']
     rec.build_client_model(clientlist=clientlist,max_chunks=24,max_vids=10000)
 
     #domainlist = ['vimeo','youtube']
